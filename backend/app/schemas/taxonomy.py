@@ -69,8 +69,9 @@ TAXONOMY: dict[DarkPatternCategory, CategoryInfo] = {
             DarkPatternCategory.CONFIRM_SHAMING,
             "Confirm Shaming",
             3,
-            "Wording or media that creates fear, shame, ridicule or guilt "
-            "to nudge the user toward a particular choice.",
+            "Wording, audio, video or other means that create fear, shame, "
+            "ridicule or guilt to nudge the user into buying a product or "
+            "continuing a subscription, for commercial gain.",
         ),
         CategoryInfo(
             DarkPatternCategory.FORCED_ACTION,
@@ -106,8 +107,11 @@ TAXONOMY: dict[DarkPatternCategory, CategoryInfo] = {
             DarkPatternCategory.DRIP_PRICING,
             "Drip Pricing",
             8,
-            "Not disclosing price elements upfront, or revealing them "
-            "gradually so the final price exceeds what was first shown.",
+            "Price elements that are not disclosed upfront or are revealed "
+            "later, such as a higher amount charged after checkout than was "
+            "shown, a product advertised as free that needs in-app "
+            "purchases to keep using it, or a paid-for service withheld "
+            "until the user buys something extra.",
         ),
         CategoryInfo(
             DarkPatternCategory.DISGUISED_ADVERTISEMENT,
@@ -121,30 +125,34 @@ TAXONOMY: dict[DarkPatternCategory, CategoryInfo] = {
             DarkPatternCategory.NAGGING,
             "Nagging",
             10,
-            "Persistent, repeated requests or interruptions that push a "
-            "transaction or data sharing, with no easy way to stop them.",
+            "Repeatedly and persistently disrupting the user with requests, "
+            "information, options or interruptions to push a transaction "
+            "for commercial gain, unless the user has specifically "
+            "permitted it.",
         ),
         CategoryInfo(
             DarkPatternCategory.TRICK_QUESTION,
             "Trick Question",
             11,
-            "Deliberately confusing or ambiguous wording, such as double "
-            "negatives, that misleads the user into an unintended choice.",
+            "Deliberately confusing or vague wording, such as double "
+            "negatives, used to steer the user away from the action they "
+            "want or into a particular response.",
         ),
         CategoryInfo(
             DarkPatternCategory.SAAS_BILLING,
             "SaaS Billing",
             12,
-            "Recurring-payment practices in software services that hide, "
-            "obscure or unfairly impose charges on the user.",
+            "In software-as-a-service billing, exploiting recurring "
+            "subscription payment loops to collect money from the user as "
+            "discreetly as possible.",
         ),
         CategoryInfo(
             DarkPatternCategory.ROGUE_MALWARE,
             "Rogue Malware",
             13,
-            "Scareware or ransomware-style tactics that mislead the user "
-            "into believing their device is compromised so they pay or "
-            "install something.",
+            "Using ransomware or scareware to falsely convince the user "
+            "that their device has a virus or is compromised, so they pay "
+            "for or install a supposed removal tool.",
         ),
     )
 }
