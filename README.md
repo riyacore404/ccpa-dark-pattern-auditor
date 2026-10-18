@@ -124,7 +124,8 @@ cd backend && pytest -q          # 393 passed, 32 skipped without a database or 
 The skipped tests run against a throwaway Postgres and Redis:
 
 ```bash
-TEST_DATABASE_URL="postgresql://user@host/ccpa_test" TEST_REDIS_URL="redis://localhost:6379/9" pytest -q
+TEST_DATABASE_URL="postgresql://user@host/ccpa_test" 
+TEST_REDIS_URL="redis://localhost:6379/9" pytest -q
 ```
 
 (The database name must contain `test`; the suite drops and recreates its tables.)
