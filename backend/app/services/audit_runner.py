@@ -180,7 +180,16 @@ class AuditRunner:
 
             try:
                 report = self._analyzer.analyze_step(to_step_context(stored))
-            except GeminiAnalysisError:
+            except GeminiAnalysisError as exc:
+                cause = exc.__cause__
+                logger.warning(
+                    "audit %s step %s analysis failed: %s (cause %s, code %s)",
+                    sid,
+                    number,
+                    exc,
+                    type(cause).__name__ if cause else "none",
+                    getattr(cause, "code", None),
+                )
                 self._repo.set_analysis_status(step_id, "FAILED")
                 analysis_failures += 1
                 self._emit(sid, "analysis_failed", step_number=number)

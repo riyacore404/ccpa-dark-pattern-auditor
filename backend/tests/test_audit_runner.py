@@ -369,6 +369,23 @@ def test_analysis_failure_keeps_the_step_and_marks_it_failed():
     assert outcome.steps_captured == 2
 
 
+def test_analysis_failure_logs_the_cause_class_and_code_but_never_message_text(caplog):
+    class ApiError(Exception):
+        code = 429
+
+    class CausedAnalyzer(FakeAnalyzer):
+        def analyze_step(self, ctx):
+            error = GeminiAnalysisError("Gemini request failed")
+            error.__cause__ = ApiError("key=SECRET-VALUE quota exceeded")
+            raise error
+
+    runner, *_ = build(watched([run_step(1)]), analyzer=CausedAnalyzer())
+    with caplog.at_level("WARNING"):
+        runner.run(SID)
+    assert "cause ApiError, code 429" in caplog.text
+    assert "SECRET-VALUE" not in caplog.text
+
+
 def test_all_captures_failing_is_a_failed_audit():
     runner, repo, *_ = build(
         watched([run_step(1), run_step(2)]), evidence=FakeEvidence(fail_on={1, 2})
