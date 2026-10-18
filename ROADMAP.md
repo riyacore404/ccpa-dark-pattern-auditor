@@ -10,30 +10,30 @@ Legend: `[ ]` not done, `[x]` verified by owner.
 
 Goal: repository skeleton, database schema, configuration contracts.
 
-- [ ] Directory structure created
-- [ ] `database/migrations/001_initial_schema.sql` saved
-- [ ] `backend/.env.example`, `frontend/.env.example`, `.gitignore` saved
-- [ ] `AGENTS.md`, `PROJECT_SPEC.md`, `ROADMAP.md` in repo root
-- [ ] Migration applied in Supabase (owner, manually)
-- [ ] 4 tables, 13 enum values, RLS on all 4 tables verified (owner, manually)
-- [ ] Real `.env` files created and confirmed Git-ignored
+- [x] Directory structure created
+- [x] `database/migrations/001_initial_schema.sql` saved
+- [x] `backend/.env.example`, `frontend/.env.example`, `.gitignore` saved
+- [x] `AGENTS.md`, `PROJECT_SPEC.md`, `ROADMAP.md` in repo root
+- [x] Migration applied in Supabase (owner, manually)
+- [x] 4 tables, 13 enum values, RLS on all 4 tables verified (owner, manually)
+- [x] Real `.env` files created and confirmed Git-ignored
 
 Out of scope: any application code, dependency manifests, servers.
 
-## Phase 2: Schemas, taxonomy, Gemini analysis engine (NOT STARTED)
+## Phase 2: Schemas, taxonomy, Gemini analysis engine (IN PROGRESS)
 
-- [ ] Pydantic v2 compliance schemas (`backend/app/schemas/compliance.py`)
-- [ ] 13-category taxonomy with owner-supplied legal reference text
-- [ ] Evidence-grounded finding validation (a finding must cite a real step and evidence)
-- [ ] Gemini multimodal analysis service (`backend/app/services/gemini.py`), model from `GEMINI_MODEL`
-- [ ] Unit tests with mocked model responses
+- [x] Pydantic v2 compliance schemas (`backend/app/schemas/compliance.py`)
+- [x] 13-category taxonomy with owner-supplied legal reference text
+- [x] Evidence-grounded finding validation (a finding must cite a real step and evidence)
+- [x] Gemini multimodal analysis service (`backend/app/services/gemini.py`), model from `GEMINI_MODEL`
+- [x] Unit tests with mocked model responses
 
-## Phase 3: Browser agent and evidence service (NOT STARTED, provisional)
+## Phase 3: Browser agent and evidence service (IN PROGRESS)
 
-- [ ] TinyFish integration built against confirmed, documented API
-- [ ] Target URL validation and SSRF protections
-- [ ] Evidence service: private upload, SHA-256 hashing, step records
-- [ ] Safety guards: no purchases, payments or OTPs
+- [x] TinyFish integration built against confirmed, documented API
+- [x] Target URL validation and SSRF protections
+- [x] Evidence service: private upload, SHA-256 hashing, step records
+- [x] Safety guards: no purchases, payments or OTPs
 
 ## Phase 4: API, workers, realtime (NOT STARTED, provisional)
 

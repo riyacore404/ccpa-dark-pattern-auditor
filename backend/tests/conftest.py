@@ -2,7 +2,18 @@ import os
 
 import pytest
 
-_SETTINGS_ENV_PREFIXES = ("TINYFISH_", "SUPABASE_", "GEMINI_", "AUDIT_")
+_SETTINGS_ENV_PREFIXES = (
+    "TINYFISH_",
+    "SUPABASE_",
+    "GEMINI_",
+    "AUDIT_",
+    "DATABASE_",
+    "REDIS_",
+    "CELERY_",
+    "CORS_",
+    "API_",
+    "APP_",
+)
 
 
 @pytest.fixture(autouse=True)

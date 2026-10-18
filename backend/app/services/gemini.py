@@ -6,6 +6,7 @@ DOM text before anything is accepted.
 """
 
 import secrets
+import logging
 
 from google import genai
 from google.genai import types
@@ -21,6 +22,7 @@ from app.schemas.compliance import (
 from app.schemas.taxonomy import TAXONOMY
 
 PROVIDER_NAME = "gemini"
+logger = logging.getLogger(__name__)
 
 def new_delimiter_token(dom_text: str) -> str:
     """Random token for the page-text markers.
@@ -152,6 +154,10 @@ class GeminiAnalyzer:
                 config=config,
             )
         except Exception as exc:
+            logger.warning(
+                "Gemini request failed with exception type: %s",
+                type(exc).__name__,
+            )
             raise GeminiAnalysisError("Gemini request failed") from exc
 
         text = getattr(response, "text", None)
