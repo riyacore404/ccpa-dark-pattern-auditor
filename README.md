@@ -118,14 +118,13 @@ WS   /api/v1/ws/audits/{id}         live progress; first message {"type":"auth",
 ## Tests
 
 ```bash
-cd backend && pytest -q          # 393 passed, 32 skipped without a database or Redis
+cd backend && pytest -q          # 415 passed, 32 skipped without a database or Redis
 ```
 
 The skipped tests run against a throwaway Postgres and Redis:
 
 ```bash
-TEST_DATABASE_URL="postgresql://user@host/ccpa_test" 
-TEST_REDIS_URL="redis://localhost:6379/9" pytest -q
+TEST_DATABASE_URL="postgresql://user@host/ccpa_test" TEST_REDIS_URL="redis://localhost:6379/9" pytest -q
 ```
 
 (The database name must contain `test`; the suite drops and recreates its tables.)
@@ -136,12 +135,13 @@ TEST_REDIS_URL="redis://localhost:6379/9" pytest -q
 |---|---|
 | Schema, taxonomy, security validation | Done |
 | TinyFish, evidence storage, Gemini grounding | Done |
+| Live end-to-end audit (test store: 8 steps captured, 1 grounded finding) | Verified on one site |
 | Audit runner, repository | Done |
 | REST API, WebSocket, Celery worker | Done |
 | Reviewer dashboard (Next.js) | In progress |
 | Real user accounts, rate limits, stuck-run sweeper | Planned |
 
-Known limits: the agent goal and action guard are soft controls; flows behind login or CAPTCHA are out of scope by design; precision and recall have not yet been measured on a labelled set.
+Known limits: transient model errors are retried once and analysis stops after two failures in a row (the audit finishes as partial results); the agent goal and action guard are soft controls; flows behind login or CAPTCHA are out of scope by design; precision and recall have not yet been measured on a labelled set.
 
 ## Responsible use
 
