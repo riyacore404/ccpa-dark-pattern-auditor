@@ -456,3 +456,97 @@ def test_unexpected_error_after_a_cancel_does_not_overwrite_the_cancelled_status
     )
     outcome = runner.run(SID)
     assert outcome.status == "CANCELLED" and repo.finished is None
+
+
+# --- circuit breaker and duplicate findings (patch 4B.2) ---------------------
+
+
+def test_two_failures_in_a_row_stop_analysis_but_keep_capturing_evidence():
+    steps = [run_step(i) for i in range(1, 6)]
+    runner, repo, tf, ev, an, events = build(
+        watched(steps), analyzer=FakeAnalyzer(fail_on={1, 2, 3, 4, 5})
+    )
+    outcome = runner.run(SID)
+    assert an.seen == [1, 2]  # the model is not called again after two failures
+    assert outcome.steps_captured == 5
+    assert [repo.analysis[f"step-{i}"] for i in range(1, 6)] == [
+        "FAILED", "FAILED", "SKIPPED", "SKIPPED", "SKIPPED",
+    ]
+    assert outcome.status == "COMPLETED" and outcome.error_code == "PARTIAL_RESULTS"
+    assert "3 step(s) not analysed" in repo.finished[2]
+    assert sum(e["event"] == "analysis_skipped" for e in events) == 3
+
+
+def test_a_success_resets_the_failure_streak():
+    steps = [run_step(i) for i in range(1, 6)]
+    runner, repo, tf, ev, an, events = build(
+        watched(steps), analyzer=FakeAnalyzer(fail_on={1, 3})
+    )
+    outcome = runner.run(SID)
+    assert an.seen == [1, 2, 3, 4, 5]  # never two failures in a row
+    assert "SKIPPED" not in repo.analysis.values()
+    assert outcome.error_code == "PARTIAL_RESULTS"
+
+
+def test_the_failure_limit_is_a_setting():
+    steps = [run_step(i) for i in range(1, 5)]
+    runner, repo, tf, ev, an, events = build(
+        watched(steps), analyzer=FakeAnalyzer(fail_on={1, 2, 3, 4}),
+        audit_max_analysis_failures=3,
+    )
+    runner.run(SID)
+    assert an.seen == [1, 2, 3]
+    assert repo.analysis["step-4"] == "SKIPPED"
+
+
+def test_the_same_finding_on_two_steps_is_stored_once_from_the_earliest_step():
+    reports = {
+        1: GroundingReport(accepted=[finding(1)]),
+        2: GroundingReport(accepted=[finding(2)]),
+    }
+    runner, repo, tf, ev, an, events = build(
+        watched([run_step(1), run_step(2)]), analyzer=FakeAnalyzer(reports)
+    )
+    outcome = runner.run(SID)
+    assert outcome.findings_saved == 1 and outcome.findings_duplicates == 1
+    assert [len(saved[1]) for saved in repo.saved] == [1, 0]
+    assert repo.analysis["step-2"] == "COMPLETED"  # the step itself still counts as analysed
+
+
+def test_different_categories_or_quotes_are_not_merged():
+    other_category = finding(2, DarkPatternCategory.CONFIRM_SHAMING)
+    other_quote = finding(2)
+    other_quote.evidence[0].observation = "a different quote"
+    reports = {
+        1: GroundingReport(accepted=[finding(1)]),
+        2: GroundingReport(accepted=[other_category, other_quote]),
+    }
+    runner, repo, tf, ev, an, events = build(
+        watched([run_step(1), run_step(2)]), analyzer=FakeAnalyzer(reports)
+    )
+    outcome = runner.run(SID)
+    assert outcome.findings_saved == 3 and outcome.findings_duplicates == 0
+
+
+def test_quote_matching_ignores_case_and_spacing():
+    shouting = finding(2)
+    shouting.evidence[0].observation = "  Q  "
+    reports = {1: GroundingReport(accepted=[finding(1)]), 2: GroundingReport(accepted=[shouting])}
+    runner, repo, tf, ev, an, events = build(
+        watched([run_step(1), run_step(2)]), analyzer=FakeAnalyzer(reports)
+    )
+    assert runner.run(SID).findings_duplicates == 1
+
+
+def test_visual_only_findings_are_never_merged():
+    def visual(n):
+        f = finding(n)
+        f.evidence = [VerifiedEvidence(kind=EvidenceKind.VISUAL, observation="v", verified=False)]
+        return f
+
+    reports = {1: GroundingReport(accepted=[visual(1)]), 2: GroundingReport(accepted=[visual(2)])}
+    runner, repo, tf, ev, an, events = build(
+        watched([run_step(1), run_step(2)]), analyzer=FakeAnalyzer(reports)
+    )
+    outcome = runner.run(SID)
+    assert outcome.findings_saved == 2 and outcome.findings_duplicates == 0

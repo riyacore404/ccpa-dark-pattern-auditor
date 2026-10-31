@@ -25,8 +25,6 @@ from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
-GEMINI_TIMEOUT_MS = 120_000
-
 CONFIGURATION_ERRORS = (
     TinyFishConfigurationError,
     EvidenceConfigurationError,
@@ -42,7 +40,7 @@ def build_runner(settings: Settings, repository: AuditRepository) -> AuditRunner
         raise GeminiConfigurationError("GEMINI_API_KEY is not set. Set it in backend/.env.")
     client = genai.Client(
         api_key=settings.gemini_api_key.get_secret_value(),
-        http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
+        http_options=types.HttpOptions(timeout=settings.gemini_timeout_seconds * 1000),
     )
     return AuditRunner(
         repository=repository,
@@ -87,5 +85,3 @@ def execute_audit(
 @celery_app.task(name="audits.run", max_retries=0)
 def run_audit(session_id: str) -> dict[str, Any]:
     return execute_audit(session_id)
-
-

@@ -152,10 +152,11 @@ def test_build_runner_gives_gemini_a_request_timeout(monkeypatch):
         settings(
             tinyfish_api_key="tf", supabase_url="https://x.supabase.co",
             supabase_service_role_key="k", gemini_api_key="g", gemini_model="m",
+            gemini_timeout_seconds=45,
         ),
         FakeRepo(),
     )
     assert isinstance(seen["http_options"], types.HttpOptions)
-    assert seen["http_options"].timeout == tasks.GEMINI_TIMEOUT_MS
+    assert seen["http_options"].timeout == 45_000
     assert seen["api_key"] == "g"
     assert runner._vision_model == "m"

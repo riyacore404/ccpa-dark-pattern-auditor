@@ -10,6 +10,11 @@ Rules this module keeps:
 - Whatever evidence was captured is kept, even when the run is stopped early.
 - One bad step does not discard the others; the gap is recorded and the
   session finishes COMPLETED with error_code PARTIAL_RESULTS.
+- If the model fails several steps in a row, analysis stops for the rest of
+  the audit (those steps are marked SKIPPED) so an outage cannot stall it.
+  Evidence is still captured for every step.
+- The same finding seen on several steps of one audit (same category, same
+  verified page-text quote) is stored once, from the earliest step.
 - Findings are stored as PENDING_REVIEW only. This module never reviews.
 - run() does not raise for audit problems. It records them on the session.
 """
@@ -23,6 +28,7 @@ from uuid import UUID
 from app.core.config import Settings, get_settings
 from app.core.security import TargetValidationError
 from app.db.repository import AuditRepository
+from app.schemas.compliance import EvidenceKind
 from app.services.evidence import EvidenceError, StoredEvidence, to_step_context
 from app.services.gemini import GeminiAnalysisError
 from app.services.tinyfish import TinyFishError, WatchedRun, evidence_steps
@@ -58,9 +64,19 @@ class AuditOutcome:
     findings_saved: int = 0
     findings_rejected: int = 0
     skipped: bool = False
+    findings_duplicates: int = 0
 
 
 def _no_progress(event: dict[str, Any]) -> None:
+    return None
+
+
+def _dedup_key(finding: Any) -> tuple[str, str] | None:
+    """Identity of a finding across steps: its category plus its first
+    verified page-text quote. Findings with no such quote are never merged."""
+    for item in finding.evidence:
+        if item.kind == EvidenceKind.DOM_TEXT and item.verified:
+            return str(finding.category), " ".join(item.observation.split()).casefold()
     return None
 
 
@@ -92,7 +108,9 @@ class AuditRunner:
         self._evidence = evidence
         self._analyzer = analyzer
         self._vision_model = vision_model
-        self._max_steps = (settings or get_settings()).audit_max_steps
+        resolved = settings or get_settings()
+        self._max_steps = resolved.audit_max_steps
+        self._max_analysis_failures = resolved.audit_max_analysis_failures
         self._progress = progress
 
     def _emit(self, session_id: UUID, event: str, **data: Any) -> None:
@@ -153,8 +171,11 @@ class AuditRunner:
         watched = self._tinyfish.watch_run(run_id)
         captured_steps = evidence_steps(watched.detail)[: self._max_steps]
 
-        steps_ok = capture_failures = analysis_failures = 0
-        findings_saved = findings_rejected = 0
+        steps_ok = capture_failures = analysis_failures = analysis_skipped = 0
+        findings_saved = findings_rejected = findings_duplicates = 0
+        consecutive_failures = 0
+        analysis_stopped = False
+        seen_findings: set[tuple[str, str]] = set()
 
         for number, run_step in enumerate(captured_steps, start=1):
             try:
@@ -178,6 +199,12 @@ class AuditRunner:
             steps_ok += 1
             self._emit(sid, "step_captured", step_number=number)
 
+            if analysis_stopped:
+                self._repo.set_analysis_status(step_id, "SKIPPED")
+                analysis_skipped += 1
+                self._emit(sid, "analysis_skipped", step_number=number)
+                continue
+
             try:
                 report = self._analyzer.analyze_step(to_step_context(stored))
             except GeminiAnalysisError as exc:
@@ -192,22 +219,41 @@ class AuditRunner:
                 )
                 self._repo.set_analysis_status(step_id, "FAILED")
                 analysis_failures += 1
+                consecutive_failures += 1
                 self._emit(sid, "analysis_failed", step_number=number)
+                if consecutive_failures >= self._max_analysis_failures:
+                    analysis_stopped = True
+                    logger.warning(
+                        "audit %s: %d analysis failures in a row; skipping analysis "
+                        "for the remaining steps",
+                        sid,
+                        consecutive_failures,
+                    )
                 continue
 
-            self._repo.save_analysis(sid, step_id, report.accepted, report.dom_truncated)
-            findings_saved += len(report.accepted)
+            consecutive_failures = 0
+            kept = []
+            for item in report.accepted:
+                key = _dedup_key(item)
+                if key is not None and key in seen_findings:
+                    findings_duplicates += 1
+                    continue
+                if key is not None:
+                    seen_findings.add(key)
+                kept.append(item)
+            self._repo.save_analysis(sid, step_id, kept, report.dom_truncated)
+            findings_saved += len(kept)
             findings_rejected += len(report.rejected)
             self._emit(
                 sid,
                 "step_analyzed",
                 step_number=number,
-                findings=len(report.accepted),
+                findings=len(kept),
                 rejected=len(report.rejected),
             )
 
         status, code, message = self._final_status(
-            watched, steps_ok, capture_failures, analysis_failures
+            watched, steps_ok, capture_failures, analysis_failures, analysis_skipped
         )
         status, code = self._finish(sid, status, code, message)
         self._emit(sid, "session_finished", status=status, error_code=code)
@@ -218,16 +264,23 @@ class AuditRunner:
             steps_captured=steps_ok,
             findings_saved=findings_saved,
             findings_rejected=findings_rejected,
+            findings_duplicates=findings_duplicates,
         )
 
     @staticmethod
     def _final_status(
-        watched: WatchedRun, steps_ok: int, capture_failures: int, analysis_failures: int
+        watched: WatchedRun,
+        steps_ok: int,
+        capture_failures: int,
+        analysis_failures: int,
+        analysis_skipped: int = 0,
     ) -> tuple[str, str | None, str | None]:
         counts = (
             f"{steps_ok} step(s) captured, {capture_failures} capture failure(s), "
             f"{analysis_failures} analysis failure(s)."
         )
+        if analysis_skipped:
+            counts += f" {analysis_skipped} step(s) not analysed after repeated model failures."
         reason = watched.aborted_reason
         if reason:
             if reason.startswith("guard:"):
@@ -253,6 +306,6 @@ class AuditRunner:
             )
         if steps_ok == 0:
             return "FAILED", "NO_EVIDENCE_CAPTURED", f"No usable evidence. {counts}"
-        if capture_failures or analysis_failures:
+        if capture_failures or analysis_failures or analysis_skipped:
             return "COMPLETED", "PARTIAL_RESULTS", f"Some steps are incomplete. {counts}"
         return "COMPLETED", None, None

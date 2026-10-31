@@ -260,3 +260,111 @@ def test_report_not_flagged_when_page_text_fits():
     analyzer = GeminiAnalyzer(settings=make_settings(), client=client)
     report = analyzer.analyze_step(make_step(dom_text="short page"))
     assert report.dom_truncated is False
+
+
+# --- retries and timeout setting (patch 4B.2) --------------------------------
+
+
+class CodedError(Exception):
+    def __init__(self, code):
+        super().__init__(f"error {code} with {SECRET}")
+        self.code = code
+
+
+class SequenceModels:
+    """Fails with the given errors in order, then answers."""
+
+    def __init__(self, errors, text):
+        self._errors = list(errors)
+        self._text = text
+        self.calls = 0
+
+    def generate_content(self, **kwargs):
+        self.calls += 1
+        if self._errors:
+            raise self._errors.pop(0)
+        return SimpleNamespace(text=self._text)
+
+
+def sequence_client(errors, text=None):
+    client = SimpleNamespace()
+    client.models = SequenceModels(errors, text if text is not None else json.dumps({"findings": []}))
+    return client
+
+
+def test_a_503_is_retried_once_and_then_succeeds():
+    naps = []
+    client = sequence_client([CodedError(503)])
+    analyzer = GeminiAnalyzer(settings=make_settings(), client=client, sleep=naps.append)
+    report = analyzer.analyze_step(make_step())
+    assert client.models.calls == 2 and len(naps) == 1
+    assert report.accepted == []
+
+
+@pytest.mark.parametrize("code", [429, 500, 502, 503, 504])
+def test_transient_codes_are_retried(code):
+    client = sequence_client([CodedError(code)])
+    GeminiAnalyzer(settings=make_settings(), client=client, sleep=lambda s: None).analyze_step(
+        make_step()
+    )
+    assert client.models.calls == 2
+
+
+@pytest.mark.parametrize("code", [400, 401, 403, 404])
+def test_permanent_errors_are_not_retried(code):
+    client = sequence_client([CodedError(code)])
+    analyzer = GeminiAnalyzer(settings=make_settings(), client=client, sleep=lambda s: None)
+    with pytest.raises(GeminiAnalysisError):
+        analyzer.analyze_step(make_step())
+    assert client.models.calls == 1
+
+
+def test_errors_without_a_status_code_such_as_timeouts_are_not_retried():
+    client = sequence_client([TimeoutError("read timed out")])
+    analyzer = GeminiAnalyzer(settings=make_settings(), client=client, sleep=lambda s: None)
+    with pytest.raises(GeminiAnalysisError):
+        analyzer.analyze_step(make_step())
+    assert client.models.calls == 1
+
+
+def test_retries_stop_at_the_attempt_limit_and_do_not_leak_the_key():
+    client = sequence_client([CodedError(503), CodedError(503), CodedError(503)])
+    analyzer = GeminiAnalyzer(
+        settings=make_settings(gemini_max_attempts=2), client=client, sleep=lambda s: None
+    )
+    with pytest.raises(GeminiAnalysisError) as excinfo:
+        analyzer.analyze_step(make_step())
+    assert client.models.calls == 2
+    assert SECRET not in str(excinfo.value)
+
+
+def test_one_attempt_means_no_retry():
+    client = sequence_client([CodedError(503)])
+    analyzer = GeminiAnalyzer(
+        settings=make_settings(gemini_max_attempts=1), client=client, sleep=lambda s: None
+    )
+    with pytest.raises(GeminiAnalysisError):
+        analyzer.analyze_step(make_step())
+    assert client.models.calls == 1
+
+
+def test_the_pause_between_attempts_grows_and_the_log_has_no_secret(caplog):
+    naps = []
+    client = sequence_client([CodedError(503), CodedError(429)])
+    analyzer = GeminiAnalyzer(
+        settings=make_settings(gemini_max_attempts=3), client=client, sleep=naps.append
+    )
+    with caplog.at_level("WARNING"):
+        analyzer.analyze_step(make_step())
+    assert naps == [3.0, 6.0]
+    assert SECRET not in caplog.text and "code 503" in caplog.text
+
+
+def test_timeout_setting_defaults_and_bounds():
+    assert Settings(_env_file=None).gemini_timeout_seconds == 120
+    assert Settings(_env_file=None).gemini_max_attempts == 2
+    assert Settings(_env_file=None).audit_max_analysis_failures == 2
+    for bad in ({"gemini_timeout_seconds": 5}, {"gemini_max_attempts": 0},
+                {"audit_max_analysis_failures": 0}):
+        with pytest.raises(Exception):
+            Settings(_env_file=None, **bad)

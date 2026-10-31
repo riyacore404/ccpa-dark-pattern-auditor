@@ -5,8 +5,10 @@ The model proposes hypotheses; ground_findings() verifies them against the
 DOM text before anything is accepted.
 """
 
-import secrets
 import logging
+import secrets
+import time
+from collections.abc import Callable
 
 from google import genai
 from google.genai import types
@@ -21,8 +23,19 @@ from app.schemas.compliance import (
 )
 from app.schemas.taxonomy import TAXONOMY
 
-PROVIDER_NAME = "gemini"
 logger = logging.getLogger(__name__)
+
+PROVIDER_NAME = "gemini"
+
+# HTTP codes that usually clear up on their own: rate limit and server-side
+# overload or timeout. Anything else (bad request, 404, auth) is not retried.
+RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+RETRY_DELAY_SECONDS = 3.0
+
+
+def is_retryable(exc: Exception) -> bool:
+    return getattr(exc, "code", None) in RETRYABLE_STATUS_CODES
+
 
 def new_delimiter_token(dom_text: str) -> str:
     """Random token for the page-text markers.
@@ -110,6 +123,7 @@ class GeminiAnalyzer:
         self,
         settings: Settings | None = None,
         client: genai.Client | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         settings = settings or get_settings()
 
@@ -123,11 +137,46 @@ class GeminiAnalyzer:
                 raise GeminiConfigurationError(
                     "GEMINI_API_KEY is not set. Set it in backend/.env."
                 )
-            client = genai.Client(api_key=settings.gemini_api_key.get_secret_value())
+            client = genai.Client(
+                api_key=settings.gemini_api_key.get_secret_value(),
+                http_options=types.HttpOptions(
+                    timeout=settings.gemini_timeout_seconds * 1000
+                ),
+            )
 
         self._client = client
         self._model = settings.gemini_model
         self._max_dom_bytes = settings.audit_max_dom_bytes
+        self._max_attempts = settings.gemini_max_attempts
+        self._sleep = sleep
+
+    def _generate(self, contents, config):
+        """Call the model, retrying only errors that usually clear up on
+        their own. Never retries a timeout: that call already waited the full
+        timeout, and a second wait would double the delay."""
+        attempt = 1
+        while True:
+            try:
+                return self._client.models.generate_content(
+                    model=self._model,
+                    contents=contents,
+                    config=config,
+                )
+            except Exception as exc:
+                if attempt >= self._max_attempts or not is_retryable(exc):
+                    logger.warning(
+                        "Gemini request failed with exception type: %s",
+                        type(exc).__name__,
+                    )
+                    raise GeminiAnalysisError("Gemini request failed") from exc
+                logger.warning(
+                    "Gemini attempt %d of %d failed (code %s); retrying",
+                    attempt,
+                    self._max_attempts,
+                    getattr(exc, "code", None),
+                )
+                self._sleep(RETRY_DELAY_SECONDS * attempt)
+                attempt += 1
 
     def analyze_step(self, step: StepContext) -> GroundingReport:
         dom_text = truncate_utf8(step.dom_text, self._max_dom_bytes)
@@ -147,18 +196,7 @@ class GeminiAnalyzer:
             response_schema=StepAnalysisResponse,
         )
 
-        try:
-            response = self._client.models.generate_content(
-                model=self._model,
-                contents=contents,
-                config=config,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Gemini request failed with exception type: %s",
-                type(exc).__name__,
-            )
-            raise GeminiAnalysisError("Gemini request failed") from exc
+        response = self._generate(contents, config)
 
         text = getattr(response, "text", None)
         if not text:

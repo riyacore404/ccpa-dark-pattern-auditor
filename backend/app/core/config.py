@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_model: str | None = None
     audit_max_dom_bytes: int = Field(default=250000, gt=0)
+    gemini_timeout_seconds: int = Field(default=120, ge=10, le=600)
+    gemini_max_attempts: int = Field(default=2, ge=1, le=4)
+    audit_max_analysis_failures: int = Field(default=2, ge=1, le=20)
 
     database_url: SecretStr | None = None
 
