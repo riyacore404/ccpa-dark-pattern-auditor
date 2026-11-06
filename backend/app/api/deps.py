@@ -8,6 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import Settings, get_settings
 from app.db.repository import AuditRepository
+from app.services.evidence import EvidenceConfigurationError, SupabaseEvidenceStore
 from app.services.progress import RedisProgressSource
 from app.services.tinyfish import TinyFishClient, TinyFishConfigurationError
 
@@ -65,6 +66,23 @@ def get_run_canceller(
         return TinyFishClient(settings).cancel_run
     except TinyFishConfigurationError:
         return None
+
+
+def get_evidence_reader(
+    settings: Settings = Depends(get_app_settings),
+) -> Callable[[], SupabaseEvidenceStore]:
+    """Returns a function that opens the evidence store. Opening is deferred so
+    a request for an unknown audit is a 404 even when storage is not set up."""
+
+    def open_store() -> SupabaseEvidenceStore:
+        try:
+            return SupabaseEvidenceStore(settings)
+        except EvidenceConfigurationError as exc:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "Evidence storage is not configured."
+            ) from exc
+
+    return open_store
 
 
 def get_progress_source(settings: Settings = Depends(get_app_settings)) -> RedisProgressSource:

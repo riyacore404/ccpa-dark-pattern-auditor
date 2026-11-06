@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class AuditCreate(BaseModel):
@@ -21,6 +21,33 @@ class AuditCreate(BaseModel):
 class AuditCreated(BaseModel):
     session_id: UUID
     status: Literal["QUEUED"] = "QUEUED"
+
+
+class FindingReview(BaseModel):
+    """A human decision on one finding. The reviewer name is self-declared:
+    this version has one shared access token, not individual accounts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["CONFIRMED", "REJECTED", "INCONCLUSIVE"]
+    reviewer: str = Field(min_length=1, max_length=80)
+    notes: str | None = Field(default=None, max_length=2000)
+
+    @field_validator("reviewer")
+    @classmethod
+    def _reviewer_is_plain_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            raise ValueError("reviewer must be a plain, non-empty name")
+        return value
+
+    @field_validator("notes")
+    @classmethod
+    def _blank_notes_become_none(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        return value or None
 
 
 class AuditSummary(BaseModel):
@@ -73,6 +100,9 @@ class AuditFinding(BaseModel):
     model_provider: str | None = None
     model_version: str | None = None
     created_at: datetime
+    reviewed_at: datetime | None = None
+    reviewer_reference: str | None = None
+    review_notes: str | None = None
 
 
 def step_from_row(row: dict[str, Any]) -> AuditStep:
@@ -109,4 +139,7 @@ def finding_from_row(row: dict[str, Any]) -> AuditFinding:
         model_provider=row["model_provider"],
         model_version=row["model_version"],
         created_at=row["created_at"],
+        reviewed_at=row.get("reviewed_at"),
+        reviewer_reference=row.get("reviewer_reference"),
+        review_notes=row.get("review_notes"),
     )

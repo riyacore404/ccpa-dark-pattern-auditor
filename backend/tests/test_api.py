@@ -6,10 +6,17 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.deps import get_app_settings, get_enqueuer, get_repository, get_run_canceller
+from app.api.deps import (
+    get_app_settings,
+    get_enqueuer,
+    get_evidence_reader,
+    get_repository,
+    get_run_canceller,
+)
 from app.core.config import Settings
 from app.db.repository import PlatformRecord
 from app.main import create_app
+from app.services.evidence import EvidenceStorageError
 
 TOKEN = "t" * 32
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -29,6 +36,8 @@ class FakeRepo:
         self.sessions = {}
         self.steps = {}
         self.findings = {}
+        self.screenshots = {}
+        self.reviews = []
         self.finished = []
         self.fail_with = None
 
@@ -72,6 +81,35 @@ class FakeRepo:
     def list_findings(self, sid):
         return self.findings.get(sid, [])
 
+    def get_screenshot_object_path(self, sid, step_number):
+        self._maybe_fail()
+        return self.screenshots.get((sid, step_number))
+
+    def review_finding(self, sid, fid, decision, reviewer, notes):
+        self._maybe_fail()
+        self.reviews.append((sid, fid, decision, reviewer, notes))
+        for row in self.findings.get(sid, []):
+            if row["id"] == fid:
+                row.update(
+                    review_status=decision, reviewed_at=NOW,
+                    reviewer_reference=reviewer, review_notes=notes,
+                )
+                return row
+        return None
+
+
+class FakeStore:
+    def __init__(self):
+        self.objects = {}
+        self.error = None
+        self.reads = []
+
+    def get(self, path):
+        self.reads.append(path)
+        if self.error:
+            raise self.error
+        return self.objects[path]
+
 
 class Harness:
     def __init__(self, **settings_kw):
@@ -81,9 +119,11 @@ class Harness:
         self.cancelled_runs = []
         self.enqueue_error = None
         self.canceller_available = True
+        self.store = FakeStore()
         self.app = create_app(self.settings)
         self.app.dependency_overrides[get_app_settings] = lambda: self.settings
         self.app.dependency_overrides[get_repository] = lambda: self.repo
+        self.app.dependency_overrides[get_evidence_reader] = lambda: (lambda: self.store)
         self.app.dependency_overrides[get_enqueuer] = lambda: self._enqueue
         self.app.dependency_overrides[get_run_canceller] = lambda: (
             self._cancel if self.canceller_available else None
@@ -349,3 +389,195 @@ def test_docs_exist_only_in_development():
     prod = Harness(app_env="production")
     assert prod.client.get("/docs").status_code == 404
     assert prod.client.get("/openapi.json").status_code == 404
+
+
+# --- reviewing findings and screenshots (Phase 5A) ---------------------------
+
+
+def pending_finding(**extra):
+    row = dict(
+        id=uuid4(), step_number=1, category="FALSE_URGENCY", confidence_score=Decimal("0.800"),
+        grounding="DOM_VERIFIED", explanation="e", observed_behavior="o", suggested_fix=None,
+        offending_element_selector=None, legal_reference="ref", review_status="PENDING_REVIEW",
+        evidence=[], model_provider="gemini", model_version="m", created_at=NOW,
+        reviewed_at=None, reviewer_reference=None, review_notes=None,
+    )
+    row.update(extra)
+    return row
+
+
+def review_url(sid, fid):
+    return f"/api/v1/audits/{sid}/findings/{fid}"
+
+
+@pytest.mark.parametrize("method,path", [
+    ("patch", f"/api/v1/audits/{uuid4()}/findings/{uuid4()}"),
+    ("get", f"/api/v1/audits/{uuid4()}/steps/1/screenshot"),
+])
+def test_review_and_screenshot_routes_require_the_token(h, method, path):
+    assert getattr(h.client, method)(path).status_code == 401
+    wrong = getattr(h.client, method)(path, headers={"Authorization": "Bearer " + "x" * 32})
+    assert wrong.status_code == 401
+
+
+def test_a_reviewer_can_confirm_a_finding(h):
+    sid = h.add_session("COMPLETED")
+    row = pending_finding()
+    h.repo.findings[sid] = [row]
+    response = h.client.patch(
+        review_url(sid, row["id"]), headers=AUTH,
+        json={"decision": "CONFIRMED", "reviewer": "  Riya  ", "notes": "  Checked in browser. "},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["review_status"] == "CONFIRMED" and body["reviewer_reference"] == "Riya"
+    assert body["review_notes"] == "Checked in browser." and body["reviewed_at"] is not None
+    assert h.repo.reviews == [(sid, row["id"], "CONFIRMED", "Riya", "Checked in browser.")]
+
+
+def test_notes_are_optional_and_blank_notes_are_stored_as_none(h):
+    sid = h.add_session("COMPLETED")
+    row = pending_finding()
+    h.repo.findings[sid] = [row]
+    h.client.patch(review_url(sid, row["id"]), headers=AUTH,
+                   json={"decision": "REJECTED", "reviewer": "Riya", "notes": "   "})
+    assert h.repo.reviews[-1][4] is None
+    h.client.patch(review_url(sid, row["id"]), headers=AUTH,
+                   json={"decision": "INCONCLUSIVE", "reviewer": "Riya"})
+    assert h.repo.reviews[-1][2:] == ("INCONCLUSIVE", "Riya", None)
+
+
+@pytest.mark.parametrize("payload", [
+    {"decision": "PENDING_REVIEW", "reviewer": "Riya"},
+    {"decision": "APPROVED", "reviewer": "Riya"},
+    {"reviewer": "Riya"},
+    {"decision": "CONFIRMED"},
+    {"decision": "CONFIRMED", "reviewer": ""},
+    {"decision": "CONFIRMED", "reviewer": "   "},
+    {"decision": "CONFIRMED", "reviewer": "a\nb"},
+    {"decision": "CONFIRMED", "reviewer": "x" * 81},
+    {"decision": "CONFIRMED", "reviewer": "Riya", "notes": "n" * 2001},
+    {"decision": "CONFIRMED", "reviewer": "Riya", "status": "CONFIRMED"},
+])
+def test_invalid_review_requests_are_rejected_and_change_nothing(h, payload):
+    sid = h.add_session("COMPLETED")
+    row = pending_finding()
+    h.repo.findings[sid] = [row]
+    response = h.client.patch(review_url(sid, row["id"]), headers=AUTH, json=payload)
+    assert response.status_code == 422
+    assert h.repo.reviews == [] and row["review_status"] == "PENDING_REVIEW"
+
+
+def test_reviewing_a_finding_that_is_not_in_this_audit_is_404(h):
+    sid = h.add_session("COMPLETED")
+    other = h.add_session("COMPLETED")
+    row = pending_finding()
+    h.repo.findings[other] = [row]
+    response = h.client.patch(review_url(sid, row["id"]), headers=AUTH,
+                              json={"decision": "CONFIRMED", "reviewer": "Riya"})
+    assert response.status_code == 404 and row["review_status"] == "PENDING_REVIEW"
+
+
+def test_reviewing_in_an_unknown_audit_is_404_and_a_bad_id_is_422(h):
+    payload = {"decision": "CONFIRMED", "reviewer": "Riya"}
+    assert h.client.patch(review_url(uuid4(), uuid4()), headers=AUTH, json=payload).status_code == 404
+    assert h.client.patch("/api/v1/audits/not-a-uuid/findings/also-not", headers=AUTH,
+                          json=payload).status_code == 422
+
+
+def test_review_fields_appear_in_the_findings_list(h):
+    sid = h.add_session("COMPLETED")
+    h.repo.findings[sid] = [pending_finding(
+        review_status="REJECTED", reviewed_at=NOW, reviewer_reference="Riya", review_notes="n")]
+    (finding,) = h.client.get(f"/api/v1/audits/{sid}/findings", headers=AUTH).json()
+    assert finding["review_status"] == "REJECTED" and finding["reviewer_reference"] == "Riya"
+    assert finding["review_notes"] == "n" and finding["reviewed_at"].startswith("2026-10-14")
+
+
+def test_a_database_error_during_review_is_a_clean_500(h):
+    sid = h.add_session("COMPLETED")
+    row = pending_finding()
+    h.repo.findings[sid] = [row]
+    h.repo.fail_with = psycopg.errors.DataError("secret detail")
+    response = h.client.patch(review_url(sid, row["id"]), headers=AUTH,
+                              json={"decision": "CONFIRMED", "reviewer": "Riya"})
+    assert response.status_code == 500 and "secret detail" not in response.text
+
+
+def test_screenshot_is_streamed_with_safe_headers(h):
+    sid = h.add_session("COMPLETED")
+    path = f"audit-sessions/{sid}/step-0001/screenshot.png"
+    h.repo.screenshots[(sid, 1)] = path
+    h.store.objects[path] = b"\x89PNG-bytes"
+    response = h.client.get(f"/api/v1/audits/{sid}/steps/1/screenshot", headers=AUTH)
+    assert response.status_code == 200 and response.content == b"\x89PNG-bytes"
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["cache-control"] == "no-store"
+    assert "default-src 'none'" in response.headers["content-security-policy"]
+    assert h.store.reads == [path]
+
+
+@pytest.mark.parametrize("ext,media", [("jpg", "image/jpeg"), ("jpeg", "image/jpeg"), ("webp", "image/webp")])
+def test_screenshot_media_type_follows_the_stored_extension(h, ext, media):
+    sid = h.add_session("COMPLETED")
+    path = f"audit-sessions/{sid}/step-0001/screenshot.{ext}"
+    h.repo.screenshots[(sid, 1)] = path
+    h.store.objects[path] = b"x"
+    response = h.client.get(f"/api/v1/audits/{sid}/steps/1/screenshot", headers=AUTH)
+    assert response.headers["content-type"] == media
+
+
+def test_screenshot_is_404_when_there_is_none_or_the_type_is_not_an_image(h):
+    sid = h.add_session("COMPLETED")
+    url = f"/api/v1/audits/{sid}/steps/1/screenshot"
+    assert h.client.get(url, headers=AUTH).status_code == 404
+    h.repo.screenshots[(sid, 1)] = f"audit-sessions/{sid}/step-0001/dom.html"
+    assert h.client.get(url, headers=AUTH).status_code == 404
+    assert h.store.reads == []  # an unsupported type never reaches storage
+
+
+def test_screenshot_for_an_unknown_audit_is_404_and_bad_step_numbers_are_422(h):
+    assert h.client.get(f"/api/v1/audits/{uuid4()}/steps/1/screenshot", headers=AUTH).status_code == 404
+    sid = h.add_session("COMPLETED")
+    for bad in ("0", "-1", "1001", "abc"):
+        assert h.client.get(f"/api/v1/audits/{sid}/steps/{bad}/screenshot", headers=AUTH).status_code == 422
+
+
+def test_storage_failure_is_a_502_that_leaks_nothing(h):
+    sid = h.add_session("COMPLETED")
+    path = f"audit-sessions/{sid}/step-0001/screenshot.png"
+    h.repo.screenshots[(sid, 1)] = path
+    h.store.error = EvidenceStorageError("evidence read failed: HTTP 500 sb_secret_abc")
+    response = h.client.get(f"/api/v1/audits/{sid}/steps/1/screenshot", headers=AUTH)
+    assert response.status_code == 502
+    assert "sb_secret_abc" not in response.text and "audit-sessions" not in response.text
+
+
+def test_unconfigured_storage_is_a_503():
+    h = Harness()
+    h.app.dependency_overrides.pop(get_evidence_reader)
+    sid = h.add_session("COMPLETED")
+    h.repo.screenshots[(sid, 1)] = f"audit-sessions/{sid}/step-0001/screenshot.png"
+    response = h.client.get(f"/api/v1/audits/{sid}/steps/1/screenshot", headers=AUTH)
+    assert response.status_code == 503 and "not configured" in response.json()["detail"]
+
+
+def test_unknown_audit_is_404_even_when_storage_is_not_configured():
+    h = Harness()
+    h.app.dependency_overrides.pop(get_evidence_reader)
+    assert h.client.get(f"/api/v1/audits/{uuid4()}/steps/1/screenshot", headers=AUTH).status_code == 404
+    sid = h.add_session("COMPLETED")
+    assert h.client.get(f"/api/v1/audits/{sid}/steps/1/screenshot", headers=AUTH).status_code == 404
+
+
+def test_cors_allows_patch_only_from_listed_origins(h):
+    allowed = h.client.options(
+        "/api/v1/audits", headers={"Origin": "http://localhost:3000",
+                                   "Access-Control-Request-Method": "PATCH"})
+    assert "PATCH" in allowed.headers["access-control-allow-methods"]
+    assert allowed.headers["access-control-allow-origin"] == "http://localhost:3000"
+    foreign = h.client.options(
+        "/api/v1/audits", headers={"Origin": "https://evil.example",
+                                   "Access-Control-Request-Method": "PATCH"})
+    assert "access-control-allow-origin" not in foreign.headers

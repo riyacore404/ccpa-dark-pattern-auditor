@@ -24,6 +24,7 @@ from app.services.tinyfish import RunStep, TinyFishClient
 _OBJECT_PATH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9/_.-]*$")
 _SAFE_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 _ERROR_SNIPPET_CHARS = 200
+MAX_READ_BYTES = 15 * 1024 * 1024
 
 
 class EvidenceError(RuntimeError):
@@ -218,6 +219,21 @@ class SupabaseEvidenceStore:
             raise EvidenceStorageError(
                 f"evidence upload failed: HTTP {response.status_code} {snippet}".strip()
             )
+
+    def get(self, object_path: str) -> bytes:
+        """Read one stored object back with the backend key. The bucket stays
+        private; callers decide who may see the bytes."""
+        _check_object_path(object_path)
+        url = f"{self._base}/storage/v1/object/{self._bucket}/{quote(object_path, safe='/')}"
+        try:
+            response = self._http.get(url, headers=self._headers(), follow_redirects=False)
+        except httpx.HTTPError as exc:
+            raise EvidenceStorageError(f"evidence read failed: {type(exc).__name__}") from exc
+        if response.status_code != 200:
+            raise EvidenceStorageError(f"evidence read failed: HTTP {response.status_code}")
+        if len(response.content) > MAX_READ_BYTES:
+            raise EvidenceStorageError("evidence read failed: object is too large")
+        return response.content
 
 
 # ---------------------------------------------------------------------------

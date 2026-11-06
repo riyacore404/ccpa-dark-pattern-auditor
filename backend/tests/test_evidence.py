@@ -462,3 +462,44 @@ def test_step_context_carries_the_captured_fields():
     assert context.page_title == "Cart | Example Shop"
     assert context.screenshot == JPEG and context.screenshot_mime_type == "image/jpeg"
     assert context.dom_text == evidence.dom_text
+
+
+# --- reading evidence back (Phase 5A) ----------------------------------------
+
+
+def test_get_reads_the_object_with_the_backend_key_only():
+    store, seen = make_store(lambda r: httpx.Response(200, content=b"png-bytes"))
+    path = f"audit-sessions/{SESSION}/step-0001/screenshot.png"
+    assert store.get(path) == b"png-bytes"
+    request = seen[0]
+    assert request.method == "GET"
+    assert str(request.url) == f"https://abcd.supabase.co/storage/v1/object/private-audit-evidence/{path}"
+    assert request.headers["apikey"] == SECRET_KEY
+
+
+def test_get_failure_reports_status_but_never_the_key_or_body():
+    store, _ = make_store(lambda r: httpx.Response(400, text=f"bad {SECRET_KEY}"))
+    with pytest.raises(EvidenceStorageError) as excinfo:
+        store.get(f"audit-sessions/{SESSION}/step-0001/screenshot.png")
+    assert "HTTP 400" in str(excinfo.value) and SECRET_KEY not in str(excinfo.value)
+
+
+def test_get_network_error_is_a_storage_error():
+    def boom(request):
+        raise httpx.ConnectError(f"cannot reach {SECRET_KEY}")
+
+    store, _ = make_store(boom)
+    with pytest.raises(EvidenceStorageError) as excinfo:
+        store.get(f"audit-sessions/{SESSION}/step-0001/screenshot.png")
+    assert SECRET_KEY not in str(excinfo.value)
+
+
+def test_get_refuses_unsafe_paths_and_oversized_objects(monkeypatch):
+    store, seen = make_store(lambda r: httpx.Response(200, content=b"12345"))
+    for bad in ("../x.png", "/abs.png", "a//b.png"):
+        with pytest.raises(EvidenceError):
+            store.get(bad)
+    assert seen == []
+    monkeypatch.setattr("app.services.evidence.MAX_READ_BYTES", 4)
+    with pytest.raises(EvidenceStorageError):
+        store.get(f"audit-sessions/{SESSION}/step-0001/screenshot.png")

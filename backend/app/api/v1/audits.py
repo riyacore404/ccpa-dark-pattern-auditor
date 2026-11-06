@@ -7,12 +7,23 @@ from typing import Any
 from uuid import UUID
 
 import redis
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Path,
+    Query,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from fastapi.concurrency import run_in_threadpool
 
 from app.api.deps import (
     get_app_settings,
     get_enqueuer,
+    get_evidence_reader,
     get_progress_source,
     get_repository,
     get_run_canceller,
@@ -28,10 +39,12 @@ from app.schemas.api import (
     AuditFinding,
     AuditStep,
     AuditSummary,
+    FindingReview,
     finding_from_row,
     step_from_row,
 )
 from app.services.audit_intake import AuditRequestError, request_audit
+from app.services.evidence import EvidenceError
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +52,8 @@ FINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 AUTH_TIMEOUT_SECONDS = 10.0
 HEARTBEAT_SECONDS = 25.0
 STREAM_GRACE_SECONDS = 900.0
+
+SCREENSHOT_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_token)])
 ws_router = APIRouter(prefix="/api/v1")
@@ -105,6 +120,53 @@ def get_audit_findings(
 ) -> list[AuditFinding]:
     _summary_or_404(repo, session_id)
     return [finding_from_row(row) for row in repo.list_findings(session_id)]
+
+
+@router.patch("/audits/{session_id}/findings/{finding_id}", response_model=AuditFinding)
+def review_finding(
+    session_id: UUID,
+    finding_id: UUID,
+    body: FindingReview,
+    repo: AuditRepository = Depends(get_repository),
+) -> AuditFinding:
+    """Record a human reviewer's decision. This is the only place a finding
+    leaves PENDING_REVIEW."""
+    _summary_or_404(repo, session_id)
+    row = repo.review_finding(session_id, finding_id, body.decision, body.reviewer, body.notes)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Finding not found in this audit.")
+    return finding_from_row(row)
+
+
+@router.get("/audits/{session_id}/steps/{step_number}/screenshot")
+def get_step_screenshot(
+    session_id: UUID,
+    step_number: int = Path(ge=1, le=1000),
+    repo: AuditRepository = Depends(get_repository),
+    open_store=Depends(get_evidence_reader),
+) -> Response:
+    """Stream one step's screenshot. The storage bucket stays private; the
+    bytes only leave through this token-protected route."""
+    _summary_or_404(repo, session_id)
+    object_path = repo.get_screenshot_object_path(session_id, step_number)
+    media_type = None
+    if object_path:
+        media_type = SCREENSHOT_TYPES.get(object_path[object_path.rfind(".") :].lower())
+    if not object_path or media_type is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No screenshot for this step.")
+    store = open_store()
+    try:
+        data = store.get(object_path)
+    except EvidenceError as exc:
+        logger.error("screenshot read failed for audit %s: %s", session_id, type(exc).__name__)
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, "Evidence storage is unavailable."
+        ) from exc
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Security-Policy": "default-src 'none'"},
+    )
 
 
 @router.post("/audits/{session_id}/cancel", response_model=AuditSummary)

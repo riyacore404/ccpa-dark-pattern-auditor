@@ -4,8 +4,9 @@ Plain SQL through psycopg. Each method runs in its own transaction, so a
 crash never leaves a half-written step. The connection comes from a factory so
 tests and the owner probe can substitute their own.
 
-Findings are always stored as PENDING_REVIEW. Nothing here changes a review
-status; only a human reviewer does that, in a later phase.
+Findings are always stored as PENDING_REVIEW. The one method that changes a
+review status is review_finding(), and only the review endpoint calls it: a
+person decides, never the audit pipeline.
 """
 
 from collections.abc import Callable
@@ -24,6 +25,7 @@ from app.services.evidence import StoredEvidence
 
 ALLOWED_FINAL_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 ANALYSIS_STATUSES = frozenset({"COMPLETED", "FAILED", "SKIPPED"})
+REVIEW_DECISIONS = frozenset({"CONFIRMED", "REJECTED", "INCONCLUSIVE"})
 PLATFORM_CATEGORIES = frozenset(
     {"E_COMMERCE", "QUICK_COMMERCE", "TRAVEL", "SUBSCRIPTION", "OTHER"}
 )
@@ -317,6 +319,43 @@ class AuditRepository:
                 (_as_uuid(session_id),),
             )
             return list(cur.fetchall())
+
+    def get_screenshot_object_path(
+        self, session_id: UUID | str, step_number: int
+    ) -> str | None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT screenshot_object_path FROM public.audit_steps "
+                "WHERE session_id = %s AND step_number = %s",
+                (_as_uuid(session_id), step_number),
+            )
+            row = cur.fetchone()
+            return row["screenshot_object_path"] if row else None
+
+    def review_finding(
+        self,
+        session_id: UUID | str,
+        finding_id: UUID | str,
+        decision: str,
+        reviewer: str,
+        notes: str | None,
+    ) -> dict[str, Any] | None:
+        """Record a human decision on one finding of one audit. Returns the
+        updated finding row, or None when that finding is not in that audit."""
+        if decision not in REVIEW_DECISIONS:
+            raise ValueError("unknown review decision")
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "WITH upd AS ("
+                "UPDATE public.dark_pattern_violations "
+                "SET review_status = %s::public.finding_review_status, "
+                "reviewed_at = NOW(), reviewer_reference = %s, review_notes = %s "
+                "WHERE id = %s AND session_id = %s RETURNING *) "
+                "SELECT upd.*, s.step_number FROM upd "
+                "JOIN public.audit_steps s ON s.id = upd.step_id",
+                (decision, reviewer, notes, _as_uuid(finding_id), _as_uuid(session_id)),
+            )
+            return cur.fetchone()
 
     def list_findings(self, session_id: UUID | str) -> list[dict[str, Any]]:
         with self._connect() as conn, conn.cursor() as cur:

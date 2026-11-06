@@ -334,3 +334,64 @@ def test_cancelled_session_is_not_overwritten_by_a_running_audit(repo):
     # Simulate the worker arriving after the cancel: the claim is refused.
     assert runner.run(sid).skipped is True
     assert repo.get_session(sid).status == "CANCELLED"
+
+
+# --- human review and screenshot lookup (Phase 5A) ---------------------------
+
+
+def session_with_one_finding(repo):
+    sid = new_session(repo)
+    step_id = repo.insert_step(sid, stored(1))
+    repo.save_analysis(sid, step_id, [finding()], dom_truncated=False)
+    return sid, repo.list_findings(sid)[0]["id"]
+
+
+def test_review_records_the_decision_who_and_when(repo):
+    sid, fid = session_with_one_finding(repo)
+    row = repo.review_finding(sid, fid, "CONFIRMED", "Riya", "seen in browser")
+    assert row["review_status"] == "CONFIRMED" and row["reviewer_reference"] == "Riya"
+    assert row["review_notes"] == "seen in browser" and row["reviewed_at"] is not None
+    assert row["step_number"] == 1
+    (listed,) = repo.list_findings(sid)
+    assert listed["review_status"] == "CONFIRMED" and listed["reviewed_at"] is not None
+
+
+def test_a_new_finding_is_pending_and_unreviewed(repo):
+    sid, fid = session_with_one_finding(repo)
+    (listed,) = repo.list_findings(sid)
+    assert listed["review_status"] == "PENDING_REVIEW"
+    assert listed["reviewed_at"] is None and listed["reviewer_reference"] is None
+
+
+def test_a_reviewer_can_change_their_decision(repo):
+    sid, fid = session_with_one_finding(repo)
+    repo.review_finding(sid, fid, "REJECTED", "Riya", "first look")
+    row = repo.review_finding(sid, fid, "INCONCLUSIVE", "Sam", None)
+    assert row["review_status"] == "INCONCLUSIVE" and row["reviewer_reference"] == "Sam"
+    assert row["review_notes"] is None
+
+
+def test_review_never_touches_a_finding_of_another_audit(repo):
+    sid, fid = session_with_one_finding(repo)
+    other = new_session(repo)
+    assert repo.review_finding(other, fid, "CONFIRMED", "Riya", None) is None
+    assert repo.list_findings(sid)[0]["review_status"] == "PENDING_REVIEW"
+    assert repo.review_finding(sid, uuid4(), "CONFIRMED", "Riya", None) is None
+
+
+def test_review_refuses_a_decision_that_is_not_a_human_outcome(repo):
+    sid, fid = session_with_one_finding(repo)
+    for bad in ("PENDING_REVIEW", "APPROVED", "", "confirmed"):
+        with pytest.raises(ValueError):
+            repo.review_finding(sid, fid, bad, "Riya", None)
+    assert repo.list_findings(sid)[0]["review_status"] == "PENDING_REVIEW"
+
+
+def test_screenshot_path_lookup(repo):
+    sid = new_session(repo)
+    repo.insert_step(sid, stored(1))
+    repo.insert_failed_step(sid, 2, "Click", "https://shop.example.com/p")
+    assert repo.get_screenshot_object_path(sid, 1).endswith("step-0001/screenshot.jpg")
+    assert repo.get_screenshot_object_path(sid, 2) is None  # failed step: no evidence
+    assert repo.get_screenshot_object_path(sid, 9) is None
+    assert repo.get_screenshot_object_path(new_session(repo), 1) is None
