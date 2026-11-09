@@ -42,11 +42,11 @@ Out of scope: any application code, dependency manifests, servers.
 - [ ] Authenticated WebSocket progress stream
 - [ ] Alembic setup aligned with the SQL migration
 
-## Phase 5: Reviewer dashboard (NOT STARTED, provisional)
+## Phase 5: Reviewer dashboard (IN PROGRESS)
 
-- [ ] Next.js app, typed API client, WebSocket client
-- [ ] Audit launch, live progress, step/evidence viewer
-- [ ] Finding review workflow (confirm, reject, inconclusive)
+- [x] Next.js app, typed API client, WebSocket client
+- [x] Audit launch, live progress, step/evidence viewer
+- [x] Finding review workflow (confirm, reject, inconclusive; code never writes a review status: only the review endpoint may write one)
 
 ## Phase 6: Hardening and documentation (NOT STARTED, provisional)
 

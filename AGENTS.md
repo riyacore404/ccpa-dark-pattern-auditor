@@ -28,7 +28,7 @@ You are an **implementation tool**, not a decision-maker.
 
 ## 3. Project invariants (never violate)
 
-- The system produces **machine-generated hypotheses**, never legal verdicts. Findings default to `PENDING_REVIEW`; only a human reviewer may change that.
+- The system produces **machine-generated hypotheses**, never legal verdicts. Findings default to `PENDING_REVIEW`; only a human reviewer may change that. Code never writes a review status: only the review endpoint may write one.
 - Evidence (screenshots, DOM snapshots) is stored in a **private** bucket. The database stores object paths, never public URLs.
 - Backend secrets never appear in the frontend, in any `NEXT_PUBLIC_*` variable, or in client-side code.
 - The auditor must never complete purchases, submit payment details, submit OTPs, or bypass access controls.
